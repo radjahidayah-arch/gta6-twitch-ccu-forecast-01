@@ -163,24 +163,52 @@ def model_rows(p1, comparables):
         pooled_den += den
     pooled_slope = pooled_num / pooled_den if pooled_den > 0 else 0.0
 
-    rows = []
+    # Median log ratios and sigmas per hour, filled in below; an hour with
+    # too few comparables borrows its shape from its nearest neighbours
+    # (linear in log space) instead of snapping to flat persistence, so one
+    # thin hour cannot tear a hole in the day's curve.
+    med_log_by_hour = {}
+    sigma_by_hour = {}
     for h in range(2, 25):
         info = per_hour[h]
         if info is None:
-            # No usable comparables for this hour: persistence for this hour.
-            sigma = BASE_SIGMA * math.sqrt(h - 1)
-            rows.append((h, [p1 * math.exp(z * sigma) for z in Z]))
             continue
         xbar, ybar, slope_h, pairs = info
         slope = (1.0 - SHRINK) * slope_h + SHRINK * pooled_slope
         med_log = ybar + slope * (log_p1 - xbar)
-        # Residual spread around the fitted line, inflated for small samples.
         resid = [y - (ybar + slope * (x - xbar)) for x, y in pairs]
         sd = statistics.stdev(resid) if len(resid) > 1 else 0.4
         sigma = min(SIGMA_CAP, max(SIGMA_FLOOR, sd * SIGMA_MULT))
-        # Clamp the median shape to the observed range, padded a little.
         obs = [y for _, y in pairs]
         med_log = min(max(obs) + CLAMP_PAD, max(min(obs) - CLAMP_PAD, med_log))
+        med_log_by_hour[h] = med_log
+        sigma_by_hour[h] = sigma
+
+    rows = []
+    for h in range(2, 25):
+        if h in med_log_by_hour:
+            med_log = med_log_by_hour[h]
+            sigma = sigma_by_hour[h]
+        else:
+            # Borrow from the nearest hours that have a shape.
+            below = [k for k in med_log_by_hour if k < h]
+            above = [k for k in med_log_by_hour if k > h]
+            if below and above:
+                lo, hi = max(below), min(above)
+                w = (h - lo) / (hi - lo)
+                med_log = med_log_by_hour[lo] * (1.0 - w) + med_log_by_hour[hi] * w
+                sigma = sigma_by_hour[lo] * (1.0 - w) + sigma_by_hour[hi] * w
+            elif below:
+                med_log = med_log_by_hour[max(below)]
+                sigma = sigma_by_hour[max(below)]
+            elif above:
+                med_log = med_log_by_hour[min(above)]
+                sigma = sigma_by_hour[min(above)]
+            else:
+                # No usable comparables at all for any hour: persistence.
+                sigma = BASE_SIGMA * math.sqrt(h - 1)
+                rows.append((h, [p1 * math.exp(z * sigma) for z in Z]))
+                continue
         med_q = p1 * math.exp(med_log)
         rows.append((h, [med_q * math.exp(z * sigma) for z in Z]))
     return rows
